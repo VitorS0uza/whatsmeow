@@ -868,19 +868,14 @@ func (cli *Client) sendDM(
 		node.Content = append(node.GetChildren(), cli.getMessageReportingToken(messagePlaintext, message, ownID, to, id))
 	}
 
-	// 🔒 FIX: Verificar se PrivacyTokens está inicializado antes de usar
-	var tcToken *store.PrivacyToken
-	if cli.Store != nil && cli.Store.PrivacyTokens != nil {
-		var err error
-		tcToken, err = cli.Store.PrivacyTokens.GetPrivacyToken(ctx, to)
-		if err != nil {
-			cli.Log.Warnf("Failed to get privacy token for %s: %v", to, err)
-		}
+	tcTokenBytes, tcErr := cli.ensureTCToken(ctx, to)
+	if tcErr != nil {
+		cli.Log.Warnf("Failed to get privacy token for %s: %v", to, tcErr)
 	}
-	if tcToken != nil {
+	if len(tcTokenBytes) > 0 {
 		node.Content = append(node.GetChildren(), waBinary.Node{
 			Tag:     "tctoken",
-			Content: tcToken.Token,
+			Content: tcTokenBytes,
 		})
 	}
 
@@ -890,6 +885,12 @@ func (cli *Client) sendDM(
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to send message node: %w", err)
 	}
+
+	storageJID := cli.resolveTCTokenStorageLID(ctx, to)
+	if shouldSendTCTokenInChatAction(to) && shouldSendNewTCToken(cli.getTCTokenSenderTS(storageJID)) {
+		go cli.issuePrivacyTokenAndSave(storageJID, time.Now())
+	}
+
 	return phash, data, nil
 }
 
@@ -1061,7 +1062,7 @@ func (cli *Client) preparePeerMessageNode(
 	if message.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_APP_STATE_SYNC_KEY_REQUEST {
 		attrs["push_priority"] = "high"
 	} else if message.GetProtocolMessage().GetPeerDataOperationRequestMessage().GetPeerDataOperationRequestType() == waE2E.PeerDataOperationRequestType_HISTORY_SYNC_ON_DEMAND {
-		//attrs["push_priority"] = "high_force"
+		attrs["push_priority"] = "high_force"
 		attrs["privacy_sensitive"] = "1"
 	}
 	start := time.Now()
